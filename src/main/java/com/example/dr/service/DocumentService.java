@@ -3,148 +3,182 @@ package com.example.dr.service;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import java.util.regex.Pattern;
-import java.util.stream.IntStream;
 
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
+
+import com.example.dr.entity.Document;
+import com.example.dr.entity.DocumentChunk;
+import com.example.dr.repository.DocumentChunkRepository;
+import com.example.dr.repository.DocumentRepository;
 
 import ai.djl.translate.TranslateException;
 
 @Service
 public class DocumentService {
-    
+
     private final EmbeddingService embeddingService;
-    
-    // Storage for processed document chunks and their embeddings
-    private List<String> documentChunks = new ArrayList<>();
-    private List<float[]> chunkEmbeddings = new ArrayList<>();
-    private String fullDocumentText = ""; // Store full text for keyword search
-    
+    private final DocumentRepository documentRepository;
+    private final DocumentChunkRepository chunkRepository;
+
     // Patterns for better context extraction
     private static final Pattern TIME_PATTERN = Pattern.compile(
         "(?i).*(\\d{1,2}\\s*[:.]\\s*\\d{2}\\s*(?:am|pm|AM|PM)?|\\d{1,2}\\s*(?:am|pm|AM|PM)|office\\s+hours?|working\\s+hours?|timing|schedule).*"
     );
-    
+
     private static final Pattern POLICY_KEYWORDS = Pattern.compile(
         "(?i).*(policy|rule|procedure|guideline|regulation|standard|requirement).*"
     );
-    
-    public DocumentService(EmbeddingService embeddingService) {
+
+    public DocumentService(
+            EmbeddingService embeddingService,
+            DocumentRepository documentRepository,
+            DocumentChunkRepository chunkRepository) {
         this.embeddingService = embeddingService;
+        this.documentRepository = documentRepository;
+        this.chunkRepository = chunkRepository;
     }
     
-    public int processDocument(MultipartFile file, int chunkSize) throws Exception {
-        // Clear previous document data
-        documentChunks.clear();
-        chunkEmbeddings.clear();
-        
+    @Transactional
+    public Long processDocument(MultipartFile file, int chunkSize) throws Exception {
         // Extract text from file
         String documentText = extractTextFromFile(file);
-        
+
         if (documentText == null || documentText.trim().isEmpty()) {
             throw new IllegalArgumentException("Unable to extract text from the uploaded file");
         }
-        
-        // Store full document text for keyword search
-        fullDocumentText = documentText;
-        
-        // Split into chunks with better context preservation
-        List<String> chunks = splitIntoChunksWithContext(documentText, chunkSize);
-        
-        // Generate embeddings for each chunk
-        List<float[]> embeddings = embeddingService.embed(chunks);
-        
-        // Store chunks and embeddings
-        documentChunks.addAll(chunks);
-        chunkEmbeddings.addAll(embeddings);
-        
-        return chunks.size();
+
+        // Create document entity
+        Document document = Document.builder()
+            .filename(file.getOriginalFilename())
+            .fileExtension(getFileExtension(file.getOriginalFilename()))
+            .fileSizeBytes(file.getSize())
+            .chunkSize(chunkSize)
+            .totalChunks(0)
+            .fullText(documentText)
+            .embeddingModel(embeddingService.getCurrentModel())
+            .status(Document.DocumentStatus.PROCESSING)
+            .build();
+
+        // Save document first to get ID
+        document = documentRepository.save(document);
+
+        try {
+            // Split into chunks
+            List<String> chunks = splitIntoChunksWithContext(documentText, chunkSize);
+
+            // Generate embeddings for all chunks
+            List<float[]> embeddings = embeddingService.embed(chunks);
+
+            // Create and save chunk entities
+            for (int i = 0; i < chunks.size(); i++) {
+                DocumentChunk chunk = DocumentChunk.builder()
+                    .document(document)
+                    .chunkIndex(i)
+                    .chunkText(chunks.get(i))
+                    .embedding(embeddings.get(i))
+                    .build();
+                document.addChunk(chunk);
+            }
+
+            // Update document with chunk count and status
+            document.setTotalChunks(chunks.size());
+            document.setStatus(Document.DocumentStatus.PROCESSED);
+            documentRepository.save(document);
+
+            return document.getId();
+
+        } catch (Exception e) {
+            // Mark document as failed
+            document.setStatus(Document.DocumentStatus.FAILED);
+            documentRepository.save(document);
+            throw e;
+        }
     }
     
+    @Transactional(readOnly = true)
     public List<String> findRelevantChunks(String question, int topK) throws TranslateException {
-        if (documentChunks.isEmpty()) {
+        long startTime = System.currentTimeMillis();
+        System.out.println("[DOC] Starting chunk retrieval for topK=" + topK);
+
+        // Check if any documents exist
+        long documentCount = documentRepository.count();
+        if (documentCount == 0) {
             throw new IllegalStateException("No document has been processed yet. Please upload a document first.");
         }
-        
-        // Use hybrid approach: semantic + keyword search
-        List<String> semanticChunks = findSemanticChunks(question, topK);
-        List<String> keywordChunks = findKeywordChunks(question, topK);
-        
-        // Combine and deduplicate results
-        List<String> combinedChunks = new ArrayList<>(semanticChunks);
-        
-        // Add keyword chunks that aren't already included
-        for (String keywordChunk : keywordChunks) {
-            if (!combinedChunks.contains(keywordChunk)) {
-                combinedChunks.add(keywordChunk);
-            }
-        }
-        
-        // If we still don't have enough chunks, add more semantic ones
-        if (combinedChunks.size() < topK) {
-            List<String> additionalChunks = findSemanticChunks(question, topK * 2);
-            for (String chunk : additionalChunks) {
-                if (!combinedChunks.contains(chunk) && combinedChunks.size() < topK) {
-                    combinedChunks.add(chunk);
-                }
-            }
-        }
-        
-        return combinedChunks.subList(0, Math.min(combinedChunks.size(), topK));
-    }
-    
-    private List<String> findSemanticChunks(String question, int topK) throws TranslateException {
-        // Generate embedding for the question
+
+        // Generate embedding for question
+        long embeddingStart = System.currentTimeMillis();
         float[] questionEmbedding = embeddingService.embed(question);
-        
-        // Calculate similarity scores
-        List<ChunkScore> scores = IntStream.range(0, documentChunks.size())
-            .mapToObj(i -> new ChunkScore(i, cosineSimilarity(questionEmbedding, chunkEmbeddings.get(i))))
-            .sorted(Comparator.comparing(ChunkScore::getScore).reversed())
-            .limit(topK)
-            .toList();
-        
-        return scores.stream()
-                    .map(score -> documentChunks.get(score.getIndex()))
-                    .toList();
-    }
-    
-    private List<String> findKeywordChunks(String question, int topK) {
-        List<String> keywordChunks = new ArrayList<>();
-        String lowerQuestion = question.toLowerCase();
-        
-        // Extract key terms from the question
-        List<String> keywords = extractKeywords(lowerQuestion);
-        
-        // Find chunks that contain these keywords
-        for (int i = 0; i < documentChunks.size(); i++) {
-            String chunk = documentChunks.get(i).toLowerCase();
-            int matchScore = 0;
-            
-            for (String keyword : keywords) {
-                if (chunk.contains(keyword)) {
-                    matchScore++;
-                }
-            }
-            
-            // Also check for special patterns based on question type
-            if (isTimeRelatedQuestion(lowerQuestion) && TIME_PATTERN.matcher(chunk).find()) {
-                matchScore += 3; // Higher weight for time-related content
-            }
-            
-            if (matchScore > 0) {
-                keywordChunks.add(documentChunks.get(i));
-            }
+        long embeddingEnd = System.currentTimeMillis();
+        System.out.println("[DOC] Question embedding generated in " + (embeddingEnd - embeddingStart) + " ms");
+
+        String embeddingStr = formatVectorForPostgres(questionEmbedding);
+
+        // Extract keywords for hybrid search
+        long keywordStart = System.currentTimeMillis();
+        List<String> keywords = extractKeywords(question.toLowerCase());
+        String keywordStr = String.join(" ", keywords);
+        long keywordEnd = System.currentTimeMillis();
+        System.out.println("[DOC] Keywords extracted in " + (keywordEnd - keywordStart) + " ms: " + keywords);
+
+        // Perform hybrid search with similarity threshold
+        // Cosine distance < 0.75 means reasonably relevant (1.0 = completely dissimilar)
+        double maxDistance = 0.75;
+
+        long searchStart = System.currentTimeMillis();
+        List<DocumentChunk> relevantChunks;
+        if (keywords.isEmpty()) {
+            // Pure semantic search if no keywords
+            relevantChunks = chunkRepository.findMostSimilarChunks(embeddingStr, topK, maxDistance);
+            System.out.println("[DOC] Using pure semantic search (threshold: " + maxDistance + ")");
+        } else {
+            // Hybrid search with ranked results
+            relevantChunks = chunkRepository.findByHybridSearch(
+                embeddingStr,
+                keywordStr,
+                topK * 2,  // More semantic candidates
+                topK,      // Keyword candidates
+                topK,      // Final limit
+                maxDistance
+            );
+            System.out.println("[DOC] Using hybrid search (threshold: " + maxDistance + ")");
         }
-        
-        return keywordChunks.stream().limit(topK).toList();
+        long searchEnd = System.currentTimeMillis();
+        System.out.println("[DOC] Database search completed in " + (searchEnd - searchStart) + " ms, found " + relevantChunks.size() + " chunks");
+
+        // Extract chunk texts
+        List<String> chunkTexts = relevantChunks.stream()
+            .map(DocumentChunk::getChunkText)
+            .toList();
+
+        long totalTime = System.currentTimeMillis() - startTime;
+        System.out.println("[DOC] Total chunk retrieval time: " + totalTime + " ms\n");
+
+        return chunkTexts;
+    }
+
+    /**
+     * Convert float array to PostgreSQL vector format: "[0.1,0.2,0.3]"
+     */
+    private String formatVectorForPostgres(float[] vector) {
+        if (vector == null || vector.length == 0) return "[]";
+
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < vector.length; i++) {
+            if (i > 0) sb.append(",");
+            sb.append(vector[i]);
+        }
+        sb.append("]");
+        return sb.toString();
     }
     
     private List<String> extractKeywords(String question) {
@@ -167,14 +201,18 @@ public class DocumentService {
     }
     
     private List<String> getRelatedTerms(String word) {
-        // Map common question terms to document terms
+        // Generic synonyms — works across any document domain
         return switch (word) {
-            case "timing", "time" -> List.of("hours", "schedule", "clock", "am", "pm", "start", "end");
-            case "office" -> List.of("workplace", "work", "company", "organization");
-            case "leave" -> List.of("vacation", "holiday", "absence", "time off", "pto");
-            case "policy" -> List.of("rule", "procedure", "guideline", "regulation");
-            case "salary" -> List.of("pay", "wage", "compensation", "remuneration");
-            case "holiday" -> List.of("festival", "vacation", "leave", "off");
+            case "cost", "price" -> List.of("amount", "fee", "charge", "rate", "expense");
+            case "start", "begin" -> List.of("commence", "initiate", "launch", "opening");
+            case "end", "finish" -> List.of("complete", "close", "conclude", "terminate", "final");
+            case "rule", "policy" -> List.of("guideline", "regulation", "procedure", "standard", "requirement");
+            case "allow", "permit" -> List.of("eligible", "authorized", "approved", "granted");
+            case "deny", "reject" -> List.of("refuse", "prohibit", "restrict", "disallow");
+            case "deadline", "due" -> List.of("date", "timeline", "schedule", "period");
+            case "process", "method" -> List.of("procedure", "step", "workflow", "approach");
+            case "benefit", "advantage" -> List.of("feature", "perk", "reward", "incentive");
+            case "issue", "problem" -> List.of("error", "bug", "defect", "concern", "challenge");
             default -> List.of();
         };
     }
@@ -246,14 +284,22 @@ public class DocumentService {
         String[] paragraphs = section.split("\\n\\s*\\n");
         List<String> chunks = new ArrayList<>();
         StringBuilder currentChunk = new StringBuilder();
-        
+        // Keep track of the last paragraph added for overlap
+        String lastParagraphOfPrevChunk = null;
+
         for (String paragraph : paragraphs) {
             paragraph = paragraph.trim();
             if (paragraph.isEmpty()) continue;
-            
+
             if (currentChunk.length() + paragraph.length() > chunkSize && currentChunk.length() > 0) {
                 chunks.add(currentChunk.toString().trim());
-                currentChunk = new StringBuilder(paragraph);
+                lastParagraphOfPrevChunk = getLastParagraph(currentChunk.toString());
+                currentChunk = new StringBuilder();
+                // Add overlap: prepend the last paragraph from the previous chunk
+                if (lastParagraphOfPrevChunk != null && !lastParagraphOfPrevChunk.isEmpty()) {
+                    currentChunk.append(lastParagraphOfPrevChunk).append("\n\n");
+                }
+                currentChunk.append(paragraph);
             } else {
                 if (currentChunk.length() > 0) {
                     currentChunk.append("\n\n");
@@ -261,12 +307,19 @@ public class DocumentService {
                 currentChunk.append(paragraph);
             }
         }
-        
+
         if (currentChunk.length() > 0) {
             chunks.add(currentChunk.toString().trim());
         }
-        
+
         return chunks;
+    }
+
+    private String getLastParagraph(String text) {
+        String trimmed = text.trim();
+        int lastBreak = trimmed.lastIndexOf("\n\n");
+        if (lastBreak == -1) return trimmed;
+        return trimmed.substring(lastBreak).trim();
     }
     
     // Rest of the methods remain the same...
@@ -315,56 +368,62 @@ public class DocumentService {
         return filename.substring(lastDotIndex + 1);
     }
     
-    private float cosineSimilarity(float[] vectorA, float[] vectorB) {
-        if (vectorA.length != vectorB.length) {
-            throw new IllegalArgumentException("Vectors must have the same length");
-        }
-        
-        float dotProduct = 0.0f;
-        float normA = 0.0f;
-        float normB = 0.0f;
-        
-        for (int i = 0; i < vectorA.length; i++) {
-            dotProduct += vectorA[i] * vectorB[i];
-            normA += vectorA[i] * vectorA[i];
-            normB += vectorB[i] * vectorB[i];
-        }
-        
-        float magnitude = (float) (Math.sqrt(normA) * Math.sqrt(normB));
-        return magnitude == 0.0f ? 0.0f : dotProduct / magnitude;
-    }
-    
-    // Helper class for sorting chunks by similarity score
-    private static class ChunkScore {
-        private final int index;
-        private final float score;
-        
-        public ChunkScore(int index, float score) {
-            this.index = index;
-            this.score = score;
-        }
-        
-        public int getIndex() { return index; }
-        public float getScore() { return score; }
-    }
-    
     // Utility methods
     public int getDocumentChunkCount() {
-        return documentChunks.size();
+        return (int) chunkRepository.count();
     }
-    
-    public boolean hasDocument() {
-        return !documentChunks.isEmpty();
+
+    public boolean hasDocuments() {
+        return documentRepository.count() > 0;
     }
-    
+
     public List<String> getDocumentChunks() {
-        return new ArrayList<>(documentChunks);
+        return chunkRepository.findAll().stream()
+            .map(DocumentChunk::getChunkText)
+            .toList();
     }
-    
+
     // Debug method to see what chunks contain specific keywords
     public List<String> debugSearchChunks(String keyword) {
-        return documentChunks.stream()
-                           .filter(chunk -> chunk.toLowerCase().contains(keyword.toLowerCase()))
-                           .toList();
+        return chunkRepository.findAll().stream()
+            .filter(chunk -> chunk.getChunkText().toLowerCase().contains(keyword.toLowerCase()))
+            .map(DocumentChunk::getChunkText)
+            .toList();
+    }
+
+    // Multi-document support methods
+
+    // Get all documents
+    public List<Document> getAllDocuments() {
+        return documentRepository.findAllByOrderByUploadTimestampDesc();
+    }
+
+    // Get document by ID
+    public Optional<Document> getDocumentById(Long id) {
+        return documentRepository.findById(id);
+    }
+
+    // Delete document
+    @Transactional
+    public void deleteDocument(Long id) {
+        documentRepository.deleteById(id);
+    }
+
+    // Find chunks in specific document
+    @Transactional(readOnly = true)
+    public List<String> findRelevantChunksInDocument(Long documentId, String question, int topK)
+            throws TranslateException {
+        float[] questionEmbedding = embeddingService.embed(question);
+        String embeddingStr = formatVectorForPostgres(questionEmbedding);
+
+        List<DocumentChunk> chunks = chunkRepository.findMostSimilarChunksInDocuments(
+            embeddingStr,
+            List.of(documentId),
+            topK
+        );
+
+        return chunks.stream()
+            .map(DocumentChunk::getChunkText)
+            .toList();
     }
 }

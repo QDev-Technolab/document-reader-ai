@@ -82,7 +82,7 @@ public class VectorType implements UserType<float[]> {
     }
 
     private String formatVector(float[] vector) {
-        if (vector == null || vector.length == 0) return "[]";
+        if (vector.length == 0) return "[]";
         StringBuilder sb = new StringBuilder("[");
         for (int i = 0; i < vector.length; i++) {
             if (i > 0) sb.append(",");

@@ -4,11 +4,15 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Optional;
-import java.util.regex.Pattern;
 
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.apache.poi.ss.usermodel.Cell;
+import org.apache.poi.ss.usermodel.DataFormatter;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.ss.usermodel.WorkbookFactory;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.springframework.stereotype.Service;
@@ -22,6 +26,10 @@ import com.example.dr.repository.DocumentRepository;
 
 import ai.djl.translate.TranslateException;
 
+/**
+ * Service responsible for uploading, parsing, chunking, embedding, and retrieving documents.
+ * Supports PDF, DOCX, TXT, XLSX, and XLS files.
+ */
 @Service
 public class DocumentService {
 
@@ -29,44 +37,36 @@ public class DocumentService {
     private final DocumentRepository documentRepository;
     private final DocumentChunkRepository chunkRepository;
 
-    // Patterns for better context extraction
-    private static final Pattern TIME_PATTERN = Pattern.compile(
-        "(?i).*(\\d{1,2}\\s*[:.]\\s*\\d{2}\\s*(?:am|pm|AM|PM)?|\\d{1,2}\\s*(?:am|pm|AM|PM)|office\\s+hours?|working\\s+hours?|timing|schedule).*"
-    );
-
-    private static final Pattern POLICY_KEYWORDS = Pattern.compile(
-        "(?i).*(policy|rule|procedure|guideline|regulation|standard|requirement).*"
-    );
-
-    public DocumentService(
-            EmbeddingService embeddingService,
-            DocumentRepository documentRepository,
-            DocumentChunkRepository chunkRepository) {
+    public DocumentService(EmbeddingService embeddingService, DocumentRepository documentRepository, DocumentChunkRepository chunkRepository) {
         this.embeddingService = embeddingService;
         this.documentRepository = documentRepository;
         this.chunkRepository = chunkRepository;
     }
-    
+
+    /**
+     * @param file      the uploaded multipart file
+     * @param chunkSize target character count per chunk
+     * @return ID of the saved {@link Document} entity
+     * @throws Exception if text extraction, embedding generation, or persistence fails
+     */
     @Transactional
     public Long processDocument(MultipartFile file, int chunkSize) throws Exception {
         // Extract text from file
         String documentText = extractTextFromFile(file);
-
         if (documentText == null || documentText.trim().isEmpty()) {
             throw new IllegalArgumentException("Unable to extract text from the uploaded file");
         }
-
         // Create document entity
         Document document = Document.builder()
-            .filename(file.getOriginalFilename())
-            .fileExtension(getFileExtension(file.getOriginalFilename()))
-            .fileSizeBytes(file.getSize())
-            .chunkSize(chunkSize)
-            .totalChunks(0)
-            .fullText(documentText)
-            .embeddingModel(embeddingService.getCurrentModel())
-            .status(Document.DocumentStatus.PROCESSING)
-            .build();
+                .filename(file.getOriginalFilename())
+                .fileExtension(getFileExtension(file.getOriginalFilename()))
+                .fileSizeBytes(file.getSize())
+                .chunkSize(chunkSize)
+                .totalChunks(0)
+                .fullText(documentText)
+                .embeddingModel(embeddingService.getCurrentModel())
+                .status(Document.DocumentStatus.PROCESSING)
+                .build();
 
         // Save document first to get ID
         document = documentRepository.save(document);
@@ -81,11 +81,11 @@ public class DocumentService {
             // Create and save chunk entities
             for (int i = 0; i < chunks.size(); i++) {
                 DocumentChunk chunk = DocumentChunk.builder()
-                    .document(document)
-                    .chunkIndex(i)
-                    .chunkText(chunks.get(i))
-                    .embedding(embeddings.get(i))
-                    .build();
+                        .document(document)
+                        .chunkIndex(i)
+                        .chunkText(chunks.get(i))
+                        .embedding(embeddings.get(i))
+                        .build();
                 document.addChunk(chunk);
             }
 
@@ -103,7 +103,15 @@ public class DocumentService {
             throw e;
         }
     }
-    
+
+    /**
+     * Embeds the question and performs a hybrid semantic + keyword search to find the most relevant text chunks.
+     *
+     * @param question the user question
+     * @param topK     maximum number of chunks to return
+     * @return list of chunk texts ordered by relevance
+     * @throws TranslateException if embedding generation fails
+     */
     @Transactional(readOnly = true)
     public List<String> findRelevantChunks(String question, int topK) throws TranslateException {
         long startTime = System.currentTimeMillis();
@@ -120,7 +128,6 @@ public class DocumentService {
         float[] questionEmbedding = embeddingService.embed(question);
         long embeddingEnd = System.currentTimeMillis();
         System.out.println("[DOC] Question embedding generated in " + (embeddingEnd - embeddingStart) + " ms");
-
         String embeddingStr = formatVectorForPostgres(questionEmbedding);
 
         // Extract keywords for hybrid search
@@ -130,10 +137,8 @@ public class DocumentService {
         long keywordEnd = System.currentTimeMillis();
         System.out.println("[DOC] Keywords extracted in " + (keywordEnd - keywordStart) + " ms: " + keywords);
 
-        // Perform hybrid search with similarity threshold
-        // Cosine distance < 0.75 means reasonably relevant (1.0 = completely dissimilar)
+        // Perform hybrid search with similarity threshold Cosine distance < 0.75 means reasonably relevant (1.0 = completely dissimilar)
         double maxDistance = 0.75;
-
         long searchStart = System.currentTimeMillis();
         List<DocumentChunk> relevantChunks;
         if (keywords.isEmpty()) {
@@ -143,63 +148,70 @@ public class DocumentService {
         } else {
             // Hybrid search with ranked results
             relevantChunks = chunkRepository.findByHybridSearch(
-                embeddingStr,
-                keywordStr,
-                topK * 2,  // More semantic candidates
-                topK,      // Keyword candidates
-                topK,      // Final limit
-                maxDistance
-            );
+                    embeddingStr,
+                    keywordStr,
+                    topK * 2, // More semantic candidates
+                    topK, // Keyword candidates
+                    topK, // Final limit
+                    maxDistance);
             System.out.println("[DOC] Using hybrid search (threshold: " + maxDistance + ")");
         }
         long searchEnd = System.currentTimeMillis();
         System.out.println("[DOC] Database search completed in " + (searchEnd - searchStart) + " ms, found " + relevantChunks.size() + " chunks");
 
         // Extract chunk texts
-        List<String> chunkTexts = relevantChunks.stream()
-            .map(DocumentChunk::getChunkText)
-            .toList();
-
+        List<String> chunkTexts = relevantChunks.stream().map(DocumentChunk::getChunkText).toList();
         long totalTime = System.currentTimeMillis() - startTime;
         System.out.println("[DOC] Total chunk retrieval time: " + totalTime + " ms\n");
-
         return chunkTexts;
     }
 
     /**
-     * Convert float array to PostgreSQL vector format: "[0.1,0.2,0.3]"
+     * @param vector the embedding float array
+     * @return pgvector-compatible string representation, e.g. {@code [0.1,0.2,0.3]}
      */
     private String formatVectorForPostgres(float[] vector) {
-        if (vector == null || vector.length == 0) return "[]";
-
+        if (vector == null || vector.length == 0)
+            return "[]";
         StringBuilder sb = new StringBuilder("[");
         for (int i = 0; i < vector.length; i++) {
-            if (i > 0) sb.append(",");
-            sb.append(vector[i]);
+            if (i > 0)
+                sb.append(",");
+                sb.append(vector[i]);
         }
         sb.append("]");
         return sb.toString();
     }
-    
+
+    /**
+     * Tokenises the question, removes stop words, and expands terms with domain-agnostic synonyms.
+     *
+     * @param question lower-cased question text
+     * @return list of keywords and related terms
+     */
     private List<String> extractKeywords(String question) {
         List<String> keywords = new ArrayList<>();
-        
+
         // Remove common stop words and extract meaningful terms
         String[] words = question.replaceAll("[^a-zA-Z0-9\\s]", "").split("\\s+");
-        
+
         for (String word : words) {
             word = word.trim().toLowerCase();
             if (word.length() > 2 && !isStopWord(word)) {
                 keywords.add(word);
-                
                 // Add related terms for better matching
                 keywords.addAll(getRelatedTerms(word));
             }
         }
-        
         return keywords;
     }
-    
+
+    /**
+     * Returns domain-agnostic synonym expansions for common words to improve keyword recall.
+     *
+     * @param word a single lower-cased keyword
+     * @return list of related terms, empty if no synonyms are mapped
+     */
     private List<String> getRelatedTerms(String word) {
         // Generic synonyms — works across any document domain
         return switch (word) {
@@ -216,35 +228,40 @@ public class DocumentService {
             default -> List.of();
         };
     }
-    
-    private boolean isTimeRelatedQuestion(String question) {
-        return question.contains("timing") || question.contains("time") || 
-               question.contains("hours") || question.contains("schedule") ||
-               question.contains("when") || question.contains("what time");
-    }
-    
+
+    /**
+     * @param word lower-cased word to test
+     * @return {@code true} if the word is a common stop word that should be excluded
+     */
     private boolean isStopWord(String word) {
-        List<String> stopWords = List.of("the", "is", "are", "was", "were", "and", "or", "but", 
-                                        "in", "on", "at", "to", "for", "of", "with", "by", "what", "how");
+        List<String> stopWords = List.of("the", "is", "are", "was", "were", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "what", "how");
         return stopWords.contains(word);
     }
-    
+
+    /**
+     * Splits document text into chunks, respecting natural section boundaries before falling back to paragraph splitting.
+     *
+     * @param text      full document text
+     * @param chunkSize target character count per chunk
+     * @return list of text chunks
+     */
     private List<String> splitIntoChunksWithContext(String text, int chunkSize) {
         if (text == null || text.trim().isEmpty()) {
             return Collections.emptyList();
         }
-        
+
         List<String> chunks = new ArrayList<>();
-        
+
         // First, try to split by sections (headers, numbered points, etc.)
         String[] sections = text.split("(?=\\n\\s*\\d+\\.\\s|\\n\\s*[A-Z][A-Z\\s]+:|\\n\\s*\\*\\s|\\n\\s*-\\s)");
-        
+
         StringBuilder currentChunk = new StringBuilder();
-        
+
         for (String section : sections) {
             section = section.trim();
-            if (section.isEmpty()) continue;
-            
+            if (section.isEmpty())
+                continue;
+
             // If this section is small enough to be a chunk by itself
             if (section.length() <= chunkSize) {
                 if (currentChunk.length() > 0) {
@@ -264,21 +281,27 @@ public class DocumentService {
                     chunks.add(currentChunk.toString().trim());
                     currentChunk = new StringBuilder();
                 }
-                
+
                 // Split large section further
                 List<String> subChunks = splitLargeSection(section, chunkSize);
                 chunks.addAll(subChunks);
             }
         }
-        
+
         // Don't forget the last chunk
         if (currentChunk.length() > 0) {
             chunks.add(currentChunk.toString().trim());
         }
-        
         return chunks.isEmpty() ? List.of(text) : chunks;
     }
-    
+
+    /**
+     * Splits a single large section into paragraph-based chunks with one-paragraph overlap between adjacent chunks.
+     *
+     * @param section   the section text to split
+     * @param chunkSize target character count per chunk
+     * @return list of text chunks
+     */
     private List<String> splitLargeSection(String section, int chunkSize) {
         // Split by paragraphs first
         String[] paragraphs = section.split("\\n\\s*\\n");
@@ -289,7 +312,8 @@ public class DocumentService {
 
         for (String paragraph : paragraphs) {
             paragraph = paragraph.trim();
-            if (paragraph.isEmpty()) continue;
+            if (paragraph.isEmpty())
+                continue;
 
             if (currentChunk.length() + paragraph.length() > chunkSize && currentChunk.length() > 0) {
                 chunks.add(currentChunk.toString().trim());
@@ -315,37 +339,59 @@ public class DocumentService {
         return chunks;
     }
 
+    /**
+     * @param text the text to extract the last paragraph from
+     * @return the last paragraph, or the full text if no double-newline separator is found
+     */
     private String getLastParagraph(String text) {
         String trimmed = text.trim();
         int lastBreak = trimmed.lastIndexOf("\n\n");
-        if (lastBreak == -1) return trimmed;
+        if (lastBreak == -1)
+            return trimmed;
         return trimmed.substring(lastBreak).trim();
     }
-    
+
+    /**
+     * @param file the uploaded file
+     * @return extracted plain text
+     * @throws IOException              if reading the file fails
+     * @throws IllegalArgumentException if the file format is unsupported
+     */
     // Rest of the methods remain the same...
     private String extractTextFromFile(MultipartFile file) throws IOException {
         String filename = file.getOriginalFilename();
         if (filename == null) {
             throw new IllegalArgumentException("File name is null");
         }
-        
+
         String extension = getFileExtension(filename).toLowerCase();
-        
+
         return switch (extension) {
             case "pdf" -> extractFromPDF(file);
             case "docx" -> extractFromDOCX(file);
             case "txt" -> extractFromTXT(file);
+            case "xlsx", "xls" -> extractFromExcel(file);
             default -> throw new IllegalArgumentException("Unsupported file format: " + extension);
         };
     }
-    
+
+    /**
+     * @param file PDF file
+     * @return extracted text
+     * @throws IOException if reading fails
+     */
     private String extractFromPDF(MultipartFile file) throws IOException {
         try (PDDocument document = PDDocument.load(file.getInputStream())) {
             PDFTextStripper stripper = new PDFTextStripper();
             return stripper.getText(document);
         }
     }
-    
+
+    /**
+     * @param file DOCX file
+     * @return extracted text
+     * @throws IOException if reading fails
+     */
     private String extractFromDOCX(MultipartFile file) throws IOException {
         try (XWPFDocument document = new XWPFDocument(file.getInputStream())) {
             StringBuilder text = new StringBuilder();
@@ -355,11 +401,50 @@ public class DocumentService {
             return text.toString();
         }
     }
-    
+
+    /**
+     * @param file Excel file (XLS or XLSX)
+     * @return extracted text with sheet names as headers
+     * @throws IOException if reading fails
+     */
+    private String extractFromExcel(MultipartFile file) throws IOException {
+        try (Workbook workbook = WorkbookFactory.create(file.getInputStream())) {
+            DataFormatter formatter = new DataFormatter();
+            StringBuilder text = new StringBuilder();
+            for (int s = 0; s < workbook.getNumberOfSheets(); s++) {
+                Sheet sheet = workbook.getSheetAt(s);
+                text.append("Sheet: ").append(sheet.getSheetName()).append("\n");
+                for (Row row : sheet) {
+                    StringBuilder rowText = new StringBuilder();
+                    for (Cell cell : row) {
+                        String cellValue = formatter.formatCellValue(cell);
+                        if (!cellValue.isBlank()) {
+                            rowText.append(cellValue).append("\t");
+                        }
+                    }
+                    if (!rowText.isEmpty()) {
+                        text.append(rowText.toString().strip()).append("\n");
+                    }
+                }
+                text.append("\n");
+            }
+            return text.toString();
+        }
+    }
+
+    /**
+     * @param file plain text file
+     * @return file content as a string
+     * @throws IOException if reading fails
+     */
     private String extractFromTXT(MultipartFile file) throws IOException {
         return new String(file.getBytes());
     }
-    
+
+    /**
+     * @param filename filename including extension
+     * @return lowercase extension without the dot, or empty string if none
+     */
     private String getFileExtension(String filename) {
         int lastDotIndex = filename.lastIndexOf('.');
         if (lastDotIndex == -1) {
@@ -367,63 +452,19 @@ public class DocumentService {
         }
         return filename.substring(lastDotIndex + 1);
     }
-    
-    // Utility methods
-    public int getDocumentChunkCount() {
-        return (int) chunkRepository.count();
-    }
 
-    public boolean hasDocuments() {
-        return documentRepository.count() > 0;
-    }
-
-    public List<String> getDocumentChunks() {
-        return chunkRepository.findAll().stream()
-            .map(DocumentChunk::getChunkText)
-            .toList();
-    }
-
-    // Debug method to see what chunks contain specific keywords
-    public List<String> debugSearchChunks(String keyword) {
-        return chunkRepository.findAll().stream()
-            .filter(chunk -> chunk.getChunkText().toLowerCase().contains(keyword.toLowerCase()))
-            .map(DocumentChunk::getChunkText)
-            .toList();
-    }
-
-    // Multi-document support methods
-
-    // Get all documents
+    /**
+     * @return all documents ordered by upload timestamp descending
+     */
     public List<Document> getAllDocuments() {
         return documentRepository.findAllByOrderByUploadTimestampDesc();
     }
 
-    // Get document by ID
-    public Optional<Document> getDocumentById(Long id) {
-        return documentRepository.findById(id);
-    }
-
-    // Delete document
+    /**
+     * @param id ID of the document to delete (cascades to all associated chunks)
+     */
     @Transactional
     public void deleteDocument(Long id) {
         documentRepository.deleteById(id);
-    }
-
-    // Find chunks in specific document
-    @Transactional(readOnly = true)
-    public List<String> findRelevantChunksInDocument(Long documentId, String question, int topK)
-            throws TranslateException {
-        float[] questionEmbedding = embeddingService.embed(question);
-        String embeddingStr = formatVectorForPostgres(questionEmbedding);
-
-        List<DocumentChunk> chunks = chunkRepository.findMostSimilarChunksInDocuments(
-            embeddingStr,
-            List.of(documentId),
-            topK
-        );
-
-        return chunks.stream()
-            .map(DocumentChunk::getChunkText)
-            .toList();
     }
 }

@@ -1,24 +1,43 @@
-# Spring Boot REST API with Ollama Integration
+# Document Reader AI — Spring Boot + Ollama + pgvector
 
-This is a **Spring Boot REST API** project that integrates with the **Ollama server** to run machine learning models for tasks such as sentence embeddings and semantic search.
+A **Spring Boot REST API** that lets you upload documents (PDF, DOCX, TXT) and chat with them using local LLMs via **Ollama** and semantic search powered by **pgvector**.  
+It includes a built-in **ChatGPT-style web UI** accessible directly from the browser, plus a full **Swagger UI** for API exploration.
 
-## ✨ Supported Models
+---
 
-The application supports the following sentence embedding models, which must be downloaded in ONNX format:
+## ✨ Features
 
-- `all-MiniLM-L6-v2`
-- `all-MiniLM-L12-v2`
-- `multi-qa-MiniLM-L6-cos-v1`
+- 📄 Upload PDF, DOCX, TXT, or Excel (XLSX/XLS) documents
+- 🧠 Semantic search using ONNX sentence-transformer embeddings (via DJL)
+- 💬 Streaming & non-streaming Q&A using a local Ollama LLM
+- 🗂️ Multi-document support with per-document querying
+- 🔀 Branching conversation history (edit & regenerate messages)
+- 🌐 Built-in dark-mode chat web UI at `http://localhost:8080`
+- 📖 Swagger UI at `http://localhost:8080/swagger-ui.html`
+- 🔍 Hybrid search (semantic + keyword) for better retrieval accuracy
 
-Each model must include a `model.onnx` file which you can download from the respective Hugging Face repositories:
+---
+
+## ✨ Supported Embedding Models
+
+The application supports the following sentence embedding models in ONNX format.  
+Each model folder must contain **three files**: `model.onnx`, `config.json`, and `tokenizer.json`.
 
 | Model Name | Hugging Face ONNX Link |
-|------------|-------------------------|
+|------------|------------------------|
 | **all-MiniLM-L6-v2** | [Download](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/tree/main/onnx) |
 | **all-MiniLM-L12-v2** | [Download](https://huggingface.co/sentence-transformers/all-MiniLM-L12-v2/tree/main/onnx) |
 | **multi-qa-MiniLM-L6-cos-v1** | [Download](https://huggingface.co/sentence-transformers/multi-qa-MiniLM-L6-cos-v1/tree/main/onnx) |
 
-> ✅ Place the downloaded `model.onnx` files in your application's designated model directory (e.g. `src/main/resources/sentence-transformers/$modelname` or as configured).
+> ✅ Place all three files for each model in the corresponding directory:
+> ```
+> src/main/resources/sentence-transformers/<model-name>/
+>   ├── model.onnx
+>   ├── config.json
+>   └── tokenizer.json
+> ```
+
+The **default model is `all-MiniLM-L6-v2`**. You can switch models at runtime via the `/chat/set-model` API or from the Swagger UI.
 
 ---
 
@@ -35,13 +54,14 @@ Before running the application, make sure the following are installed:
 
 ## 🗄️ PostgreSQL Setup Instructions
 
-This application uses **PostgreSQL** with the **pgvector** extension for vector similarity search.
+This application uses **PostgreSQL** with the **pgvector** extension for vector similarity search.  
+Database schema is **automatically managed by Flyway** — no manual SQL setup needed beyond creating the database.
 
 ### 1. Install PostgreSQL
 
 #### Windows
 
-1. Download the PostgreSQL installer from the official website:
+1. Download the PostgreSQL installer from the official website:  
    https://www.postgresql.org/download/windows/
 
 2. Run the installer and follow the setup wizard:
@@ -69,7 +89,7 @@ sudo apt install postgresql postgresql-contrib
 
 #### Windows
 
-1. Download the prebuilt pgvector package for Windows from:
+1. Download the prebuilt pgvector package for Windows from:  
    https://github.com/pgvector/pgvector/releases
 
 2. Extract and copy the files to your PostgreSQL installation directory:
@@ -171,6 +191,8 @@ ALTER USER postgres WITH PASSWORD 'postgres123';
 >
 > You can modify these in `src/main/resources/application.properties`
 
+> **ℹ️ Flyway Auto-Migration:** The full database schema (tables, indexes, HNSW vector index) is **automatically created by Flyway on first startup**. You only need to create the database and enable the `vector` extension manually.
+
 #### Windows Troubleshooting
 
 - **`psql` not found**: Add `C:\Program Files\PostgreSQL\16\bin` to your system PATH
@@ -182,7 +204,7 @@ ALTER USER postgres WITH PASSWORD 'postgres123';
 
 ## 🚀 Ollama Setup Instructions
 
-This application requires a running instance of the [Ollama](https://ollama.com) server to interface with LLMs such as `llama3` and `gemma3`.
+This application requires a running instance of the [Ollama](https://ollama.com) server with a **custom reasoning model** built from `llama3.2:3b`.
 
 ### 1. Install Ollama
 
@@ -202,17 +224,21 @@ curl -fsSL https://ollama.com/install.sh | sh
 
 > The installation script will automatically download and set up Ollama on your system.
 
-### 2. Pull and Run Required Models
+### 2. Pull Base Model and Build the Custom Reasoning Model
 
 ```bash
-ollama pull llama3.2-reasoning
-ollama run gemma3
+# Step 1: Pull the base model
+ollama pull llama3.2:3b
+
+# Step 2: Build the custom reasoning model used by this application
+ollama create llama3.2-reasoning -f ollama/Modelfile-reasoning
 ```
 
-- `llama3:8b` is used for general LLM inference.
-- `gemma3` might be used for specific lightweight tasks or responses.
+> The `ollama/Modelfile-reasoning` file in this project configures the model with an optimised system prompt and inference parameters for precise document analysis (low temperature, structured reasoning).
 
-> Make sure Ollama is running before starting the Spring Boot application.
+The application uses **`llama3.2-reasoning`** (configured in `application.properties` under `llm.model`).
+
+> ⚠️ Make sure Ollama is running **before** starting the Spring Boot application.
 
 ---
 
@@ -230,7 +256,7 @@ mvn clean install
 mvn spring-boot:run
 ```
 
-The application should now start on:
+The application will start on:
 
 ```
 http://localhost:8080
@@ -238,20 +264,59 @@ http://localhost:8080
 
 ---
 
+## 🌐 Accessing the Application
+
+| Interface | URL |
+|-----------|-----|
+| **Web Chat UI** (dark-mode ChatGPT-style) | http://localhost:8080 |
+| **Swagger UI** (interactive API explorer) | http://localhost:8080/swagger-ui.html |
+
+---
+
 ## 📂 API Endpoints
 
-> Add your specific API endpoints here. Example:
+All endpoints are grouped under two controllers. Full interactive documentation is available at **Swagger UI** (`/swagger-ui.html`).
 
-- `GET /api/embedding?model=all-MiniLM-L6-v2&text=hello world`
-- `POST /api/query`
+### Chat Controller (`/chat`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/chat/upload` | Upload a document (PDF, DOCX, TXT, XLSX, XLS). Max file size: **50 MB** |
+| `POST` | `/chat/ask` | Ask a question — auto-optimised response length |
+| `POST` | `/chat/ask-styled` | Ask with explicit style (`short` / `normal` / `detailed`) |
+| `POST` | `/chat/ask-detailed` | Ask and receive answer + the source chunks used |
+| `POST` | `/chat/ask-stream` | Streaming SSE response (token-by-token, ChatGPT-style) |
+| `GET` | `/chat/status` | Check Ollama and embedding model status |
+| `GET` | `/chat/models` | List available embedding models and current LLM models |
+| `POST` | `/chat/set-model` | Switch the active embedding model |
+| `GET` | `/chat/documents` | List all uploaded documents with metadata |
+| `DELETE` | `/chat/documents/{id}` | Delete a document and all its chunks |
+| `POST` | `/chat/documents/{id}/ask` | Ask a question scoped to a specific document |
+| `GET` | `/chat/conversations` | List all conversations |
+| `GET` | `/chat/conversations/{id}/thread` | Get the latest visible message thread |
+| `GET` | `/chat/conversations/{id}/thread-from/{msgId}` | Get thread starting from a specific message |
+| `GET` | `/chat/conversations/{id}/messages/{msgId}/siblings` | Get sibling (alternative) versions of a message |
+| `DELETE` | `/chat/conversations/{id}` | Delete a conversation |
+
+### Debug Controller (`/debug`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/debug/search-chunks?keyword=...` | Find all document chunks containing a keyword |
+| `GET` | `/debug/all-chunks` | Retrieve all stored document chunks |
+| `GET` | `/debug/find-timing` | Find chunks containing time/schedule-related content |
 
 ---
 
 ## 🧠 Additional Notes
 
-- Ensure Ollama server and the required models are running **before hitting the APIs**.
-- Make sure you download and correctly place the `model.onnx` files for each transformer model in your resource/model directory.
-- This application uses sentence transformer models for efficient and fast embedding.
+- Ensure Ollama is running with the `llama3.2-reasoning` model **before hitting the APIs**.
+- Each embedding model folder must contain **`model.onnx`**, **`config.json`**, and **`tokenizer.json`** — all three files are required.
+- The application uses a **hybrid search** strategy (combining semantic vector similarity and keyword full-text search) for improved retrieval accuracy.
+- **File upload limit**: 50 MB per file (`spring.servlet.multipart.max-file-size`).
+- Database schema migrations (tables, indexes, HNSW index) are handled automatically by **Flyway** on startup.
+- The default embedding model is `all-MiniLM-L6-v2`. You can switch at runtime using `POST /chat/set-model?model=multi-qa-MiniLM-L6-cos-v1`.
+- Conversation history supports **branching** — you can edit past messages and regenerate responses, creating alternative conversation branches (like ChatGPT's edit feature).
 
 ---
 

@@ -4,6 +4,11 @@ import jakarta.persistence.*;
 import lombok.*;
 import java.time.Instant;
 
+/**
+ * JPA entity representing a single message in a conversation, stored in the
+ * {@code chat_messages} table. Messages form a tree structure via
+ * {@code parentId}, supporting branched edit history (similar to ChatGPT's message versioning).
+ */
 @Entity
 @Table(name = "chat_messages")
 @Getter

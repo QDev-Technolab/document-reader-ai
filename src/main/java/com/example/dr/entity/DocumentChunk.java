@@ -6,6 +6,10 @@ import org.hibernate.annotations.Type;
 import com.example.dr.config.VectorType;
 import java.time.Instant;
 
+/**
+ * JPA entity representing a single text chunk of a {@link Document}, stored in the {@code document_chunks} table.
+ * Each chunk stores its text content and a 384-dimensional pgvector embedding used for semantic similarity search.
+ */
 @Entity
 @Table(name = "document_chunks")
 @Getter

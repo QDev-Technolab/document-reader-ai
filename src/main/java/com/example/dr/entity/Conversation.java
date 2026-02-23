@@ -6,6 +6,10 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * JPA entity representing a chat conversation stored in the {@code conversations} table.
+ * A conversation groups a thread of {@link ChatMessage}s and is identified by a user-visible title derived from the first question.
+ */
 @Entity
 @Table(name = "conversations")
 @Getter

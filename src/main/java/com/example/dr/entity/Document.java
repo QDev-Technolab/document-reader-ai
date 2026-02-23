@@ -6,6 +6,11 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * JPA entity representing an uploaded document stored in the {@code documents} table.
+ * A document is split into {@link DocumentChunk}s after upload. 
+ * The full extracted text and metadata (filename, size, embedding model) are persisted here.
+ */
 @Entity
 @Table(name = "documents")
 @Getter
@@ -81,6 +86,8 @@ public class Document {
     }
 
     public enum DocumentStatus {
-        PROCESSING, PROCESSED, FAILED
+        PROCESSING,
+        PROCESSED,
+        FAILED
     }
 }

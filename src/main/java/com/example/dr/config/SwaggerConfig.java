@@ -10,9 +10,18 @@ import org.springframework.context.annotation.Configuration;
 
 import java.util.List;
 
+/**
+ * Configures the OpenAPI (Swagger) documentation for the Document Reader API.
+ *
+ * <p>The generated UI is available at {@code /swagger-ui.html} when the application is running.</p>
+ */
 @Configuration
 public class SwaggerConfig {
 
+    /**
+     * Builds the {@link OpenAPI} bean that populates Swagger UI with project metadata, contact info, license, and the local development server URL.
+     *
+     */
     @Bean
     public OpenAPI customOpenAPI() {
         return new OpenAPI()

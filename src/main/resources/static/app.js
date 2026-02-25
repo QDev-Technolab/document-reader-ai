@@ -17,6 +17,42 @@ const fileInput = document.getElementById('file-input');
 const docList = document.getElementById('doc-list');
 const convList = document.getElementById('conv-list');
 const topbarTitle = document.querySelector('.topbar-title');
+const themeToggleBtn = document.getElementById('theme-toggle');
+const hljsThemeLink = document.getElementById('hljs-theme');
+
+// ---- Theme ----
+const HLJS_DARK  = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css';
+const HLJS_LIGHT = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css';
+
+function applyTheme(theme) {
+    if (theme === 'light') {
+        document.body.classList.add('light');
+        hljsThemeLink.href = HLJS_LIGHT;
+    } else {
+        document.body.classList.remove('light');
+        hljsThemeLink.href = HLJS_DARK;
+    }
+}
+
+function toggleTheme() {
+    const isLight = document.body.classList.contains('light');
+    const next = isLight ? 'dark' : 'light';
+    applyTheme(next);
+    localStorage.setItem('di-theme', next);
+}
+
+themeToggleBtn.addEventListener('click', toggleTheme);
+
+// Apply saved or system preference on load
+(function initTheme() {
+    const saved = localStorage.getItem('di-theme');
+    if (saved) {
+        applyTheme(saved);
+    } else if (window.matchMedia('(prefers-color-scheme: light)').matches) {
+        applyTheme('light');
+    }
+    // default: dark (no class needed)
+})();
 
 // ---- Markdown config ----
 marked.setOptions({
@@ -529,9 +565,30 @@ function scrollToBottom() {
 function showWelcome() {
     chatArea.innerHTML = `
     <div class="welcome" id="welcome">
-        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#10a37f" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-        <h2>Document Reader AI</h2>
-        <p>Upload a document and ask questions about it. Responses stream in real-time.</p>
+        <div class="welcome-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="16" y1="13" x2="8" y2="13"/>
+                <line x1="16" y1="17" x2="8" y2="17"/>
+            </svg>
+        </div>
+        <h2>Document Intelligence</h2>
+        <p>Upload a document and ask anything about it. Get precise answers with real-time streaming.</p>
+        <div class="welcome-tips">
+            <div class="welcome-tip">
+                <strong>Ask anything</strong>
+                Summarize, compare, or deep-dive into your document
+            </div>
+            <div class="welcome-tip">
+                <strong>Multi-format</strong>
+                Supports PDF, Word, Excel, and plain text files
+            </div>
+            <div class="welcome-tip">
+                <strong>Real-time</strong>
+                Answers stream token-by-token as they generate
+            </div>
+        </div>
     </div>`;
     lastAssistantMsgId = null;
 }

@@ -10,6 +10,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.function.Consumer;
 import org.springframework.beans.factory.annotation.Value;
@@ -189,7 +191,21 @@ public class LLMService {
         String styleInstruction = getStyleInstruction(responseStyle);
         String reasoningInstruction = getReasoningInstruction(questionType);
 
+        String currentDateTime = LocalDateTime.now()
+                .format(DateTimeFormatter.ofPattern("EEEE, MMMM d, yyyy HH:mm"));
+
+        // For complex question types, append an explicit output scaffold so the model
+        // follows the step-by-step format rather than collapsing to a flat answer.
+        String outputScaffold = switch (questionType) {
+            case "scenario" -> "\nSTEP 1 — FIND RULES:";
+            case "comparison" -> "\nSTEP 1 — IDENTIFY:";
+            case "multi_hop" -> "\nSTEP 1 — LIST FACTS:";
+            default -> "";
+        };
+
         return String.format("""
+                Current date and time: %s
+
                 %s
                 %s
 
@@ -198,7 +214,7 @@ public class LLMService {
 
                 Question: %s
 
-                Answer:""", reasoningInstruction, styleInstruction, context, question);
+                Answer:%s""", currentDateTime, reasoningInstruction, styleInstruction, context, question, outputScaffold);
     }
 
     /**
@@ -206,15 +222,36 @@ public class LLMService {
      * @return reasoning instruction string to prepend to the prompt
      */
     private String getReasoningInstruction(String questionType) {
+        String outOfContextRule = """
+
+                IMPORTANT: If the context does not contain enough information to answer this question, respond with exactly:
+                "This question is outside the scope of the uploaded document." Do NOT guess or use outside knowledge.
+                EXCEPTION: For date and time calculations (such as future dates, days of the week, or durations), \
+                you may use the current date and time provided at the top of this prompt to compute the answer.""";
+
         return switch (questionType) {
-            case "scenario" ->
-                "Answer the hypothetical scenario using the context. Apply relevant rules step by step. Use exact details.";
-            case "comparison" ->
-                "Compare the items using details from the context. Highlight key differences and similarities.";
-            case "multi_hop" ->
-                "Combine multiple pieces of information from the context to answer. Show calculations if needed.";
+            case "scenario" -> """
+                    This is a hypothetical scenario question. Work through it in clearly labelled steps:
+                    STEP 1 — FIND RULES: Identify every rule, policy, condition, or procedure in the context that is relevant to this scenario.
+                    STEP 2 — CHECK CONDITIONS: Determine which conditions in the scenario trigger or match those rules. Quote exact numbers or terms.
+                    STEP 3 — APPLY: Walk through the scenario using the rules from Step 1. Show the logic explicitly — do not skip steps.
+                    STEP 4 — CONCLUDE: State the final outcome in plain language, using exact values from the context.
+                    If the context does not cover this exact scenario, state which closest rule applies and why.""" + outOfContextRule;
+            case "comparison" -> """
+                    This is a comparison question. Structure your answer in clearly labelled steps:
+                    STEP 1 — IDENTIFY: Name each item being compared.
+                    STEP 2 — EXTRACT ATTRIBUTES: For each item, list its key attributes, figures, or properties found in the context.
+                    STEP 3 — COMPARE: Present the differences and similarities side by side. Use a table or parallel bullet points.
+                    STEP 4 — CONCLUDE: Summarise the most significant distinction and, if relevant, when each option is preferable.
+                    Only use attributes explicitly stated in the context.""" + outOfContextRule;
+            case "multi_hop" -> """
+                    This question requires combining multiple facts. Work through it step by step:
+                    STEP 1 — LIST FACTS: Extract each individual piece of information from the context that is needed to answer.
+                    STEP 2 — CHAIN LOGIC: Show how the facts connect to each other.
+                    STEP 3 — CALCULATE (if needed): Perform each calculation explicitly, showing the formula and intermediate values.
+                    STEP 4 — ANSWER: State the final answer clearly, referencing the facts from Step 1.""" + outOfContextRule;
             default ->
-                "Answer using the context below. Use exact details. Format with markdown: **bold** for key terms, bullet points for lists.";
+                "Answer the question using only the context below. Use exact details, numbers, and terms. Format with markdown: **bold** for key terms, bullet points for lists." + outOfContextRule;
         };
     }
 

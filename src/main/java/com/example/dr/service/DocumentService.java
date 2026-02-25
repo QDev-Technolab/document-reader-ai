@@ -137,8 +137,9 @@ public class DocumentService {
         long keywordEnd = System.currentTimeMillis();
         System.out.println("[DOC] Keywords extracted in " + (keywordEnd - keywordStart) + " ms: " + keywords);
 
-        // Perform hybrid search with similarity threshold Cosine distance < 0.75 means reasonably relevant (1.0 = completely dissimilar)
-        double maxDistance = 0.75;
+        // Perform hybrid search with similarity threshold. Cosine distance < 0.82 captures
+        // paraphrased or loosely related chunks that the stricter 0.75 threshold would drop.
+        double maxDistance = 0.82;
         long searchStart = System.currentTimeMillis();
         List<DocumentChunk> relevantChunks;
         if (keywords.isEmpty()) {
@@ -146,12 +147,12 @@ public class DocumentService {
             relevantChunks = chunkRepository.findMostSimilarChunks(embeddingStr, topK, maxDistance);
             System.out.println("[DOC] Using pure semantic search (threshold: " + maxDistance + ")");
         } else {
-            // Hybrid search with ranked results
+            // Hybrid search with ranked results — larger candidate pools improve recall
             relevantChunks = chunkRepository.findByHybridSearch(
                     embeddingStr,
                     keywordStr,
-                    topK * 2, // More semantic candidates
-                    topK, // Keyword candidates
+                    topK * 3, // Wider semantic candidate pool for better recall
+                    topK + 3, // More keyword candidates
                     topK, // Final limit
                     maxDistance);
             System.out.println("[DOC] Using hybrid search (threshold: " + maxDistance + ")");

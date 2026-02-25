@@ -31,7 +31,7 @@ public class ChatService {
     private final ConversationRepository conversationRepository;
     private final ChatMessageRepository chatMessageRepository;
 
-    private static final String OUT_OF_CONTEXT_MSG = "I’m unable to locate information related to your question in the uploaded document.";
+    private static final String OUT_OF_CONTEXT_MSG = "This question is outside the scope of the uploaded document. No relevant information was found to answer it.";
 
     /** Matches questions requesting a brief or concise answer. */
     private static final Pattern SHORT_PATTERNS = Pattern.compile("(?i).*(brief|short|quick|summary|concise|simple|in short).*");
@@ -425,15 +425,15 @@ public class ChatService {
     /**
      * @param questionType  question classification string
      * @param requestedTopK the client-requested topK value
-     * @return adjusted topK value capped at 6 for complex question types
+     * @return adjusted topK value capped at 9 for complex question types
      */
     private int effectiveTopK(String questionType, int requestedTopK) {
         int normalizedTopK = Math.max(1, requestedTopK);
         if ("factual".equals(questionType)) {
             return normalizedTopK;
         }
-        // Keep retrieval bounded for lower latency on complex prompts.
-        return Math.min(normalizedTopK + 1, 6);
+        // Retrieve more chunks for complex questions that need broader context.
+        return Math.min(normalizedTopK + 2, 9);
     }
 
     /**

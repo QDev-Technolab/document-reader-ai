@@ -95,7 +95,7 @@ public class ChatController {
      * @return an {@link SseEmitter} that pushes tokens to the client in real time
      */
     @PostMapping(value = "/ask-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter askStream(@RequestBody AskStreamRequest body, @RequestParam(defaultValue = "5") int topK,
+    public SseEmitter askStream(@RequestBody AskStreamRequest body, @RequestParam(defaultValue = "7") int topK,
             HttpServletResponse response) {
 
         // Disable all buffering for real-time token delivery

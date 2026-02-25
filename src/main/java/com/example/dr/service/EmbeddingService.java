@@ -19,7 +19,8 @@ import jakarta.annotation.PostConstruct;
 
 /**
  * Service that loads ONNX sentence-transformer models via DJL and generates vector embeddings for text.
- * Three models are loaded at startup; the active model defaults to {@code all-MiniLM-L6-v2}.
+ * Three models are loaded at startup; the active model defaults to {@code multi-qa-MiniLM-L6-cos-v1},
+ * which is purpose-built for semantic search and Q&A retrieval tasks.
  */
 @Service
 public class EmbeddingService {
@@ -59,8 +60,8 @@ public class EmbeddingService {
             Model model = criteria.loadModel();
             predictors.put(name, model.newPredictor(new SentenceEmbeddingTranslator()));
         }
-        // set default
-        currentModelName = "all-MiniLM-L6-v2";
+        // multi-qa is trained on 215M question-answer pairs — better retrieval accuracy than general-purpose models
+        currentModelName = "multi-qa-MiniLM-L6-cos-v1";
         currentPredictor = predictors.get(currentModelName);
     }
 
